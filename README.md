@@ -5,6 +5,8 @@ App Android điều khiển TV Sony (Google TV / Android TV), có **bàn phím g
 ## Tính năng
 - Remote đầy đủ: nguồn, Input, 4 mũi tên + OK, Quay lại, Home, Tuỳ chọn, âm lượng, kênh, tắt tiếng, bàn số, phát/tạm dừng, mở YouTube/Netflix. Giữ nút âm lượng/kênh/mũi tên để lặp.
 - **Gõ chữ**: bấm *Gõ chữ* → bàn phím điện thoại bật lên, mỗi chữ gõ hiện ngay trên TV. Nút *Tìm* = Enter. Có nút Dán, Xoá, điều hướng nhanh.
+- **Bàn phím chữ trên màn hình remote** (v1.3): cuộn xuống dưới có bàn phím QWERTY đầy đủ (Shift, ký hiệu ?123, .com, http, dấu cách, Xoá, Enter), dưới là bàn số. Mỗi phím gửi *phím bấm thật* như cắm bàn phím USB, nên gõ được cả trình duyệt của Downloader – nơi bàn phím điện thoại (Laban Key, Gboard) không gõ vào được. Chỉ chữ không dấu.
+- **Giọng nói** (v1.3): nút micro giữa cột âm lượng/kênh. Bấm 1 lần để nói, bấm lần nữa để gửi (hoặc giữ tay nói, thả tay gửi). Âm thanh từ micro điện thoại chuyển thẳng sang Google Assistant trên TV (như app Google TV). TV không nhận micro thì app dùng nhận dạng giọng nói của điện thoại (tiếng Việt) rồi gõ kết quả (không dấu) lên TV.
 - **Tự bật bàn phím**: khi trên TV mở ô tìm kiếm (YouTube, Netflix, Cài đặt…), app tự chuyển sang màn hình gõ chữ.
 - **Hồng ngoại dự phòng**: điện thoại có mắt IR (OPPO, OnePlus, Xiaomi…) thì các nút cơ bản vẫn bấm được khi chưa có Wi‑Fi, bật được TV đang tắt hẳn. Gõ chữ thì bắt buộc Wi‑Fi.
 
@@ -12,6 +14,8 @@ App Android điều khiển TV Sony (Google TV / Android TV), có **bàn phím g
 - **Wi‑Fi**: giao thức *Android TV Remote v2* (cổng 6466/6467) – cùng giao thức app Google TV dùng. Ghép nối 1 lần bằng mã 6 ký tự hiện trên TV, không cần bật gì trong cài đặt TV.
 - **Hồng ngoại**: mã Sony SIRC 12/15 bit, sóng mang 40 kHz, qua `ConsumerIrManager`.
 - Ưu tiên Wi‑Fi; mất Wi‑Fi thì tự chuyển sang hồng ngoại.
+- **Bàn phím chữ**: `tv/TvChars.kt` đổi ký tự -> KEYCODE; chữ hoa/ký hiệu cần Shift thì giữ SHIFT_LEFT (START_LONG … END_LONG) quanh phím.
+- **Giọng nói**: bấm KEYCODE_SEARCH -> TV gửi `remote_voice_begin` (30) -> app xác nhận cùng session -> gửi `remote_voice_payload` (31, PCM 16‑bit 8 kHz mono, gói 8–20 KB) -> `remote_voice_end` (32). Cần quyền micro (RECORD_AUDIO).
 
 Mã chính: `tv/AndroidTvRemote.kt` (điều khiển + gõ chữ), `tv/Pairing.kt` (ghép nối), `tv/Tls.kt` (chứng chỉ máy khách), `tv/TvDiscovery.kt` (dò TV), `ir/SonyIr.kt` (mã IR Sony), `MainViewModel.kt`, `ui/Screens.kt`.
 

@@ -2,7 +2,22 @@
 
 package com.quatrang.remotesony.ui
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.speech.RecognizerIntent
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import com.quatrang.remotesony.VoiceState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -58,7 +73,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -192,7 +206,6 @@ private fun LinkPill(vm: MainViewModel, s: UiState) {
 
 @Composable
 private fun RemoteScreen(vm: MainViewModel, s: UiState, onKeyboard: () -> Unit) {
-    var showNumbers by rememberSaveable { mutableStateOf(false) }
     val gap = 10.dp
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp, vertical = 8.dp),
@@ -250,12 +263,7 @@ private fun RemoteScreen(vm: MainViewModel, s: UiState, onKeyboard: () -> Unit) 
                 KeyButton(Modifier.fillMaxWidth().weight(1f), onPress = { vm.press(TvKey.MUTE) }) {
                     KeyIcon(Icons.AutoMirrored.Filled.VolumeOff, "Tắt tiếng")
                 }
-                KeyButton(
-                    Modifier.fillMaxWidth().weight(1f),
-                    container = if (showNumbers) MaterialTheme.colorScheme.primaryContainer
-                    else MaterialTheme.colorScheme.surfaceContainerHigh,
-                    onPress = { showNumbers = !showNumbers },
-                ) { KeyLabel("123") }
+                MicButton(vm, s, Modifier.fillMaxWidth().weight(1f))
             }
             RockerKey(Modifier.weight(1f), "CH", { vm.press(TvKey.CH_UP) }, { vm.press(TvKey.CH_DOWN) })
         }
@@ -269,9 +277,15 @@ private fun RemoteScreen(vm: MainViewModel, s: UiState, onKeyboard: () -> Unit) 
             )
         }
 
-        if (showNumbers) {
-            Spacer(Modifier.height(gap))
-            NumberPad(vm)
+        if (s.voice != VoiceState.IDLE) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                if (s.voice == VoiceState.STARTING) "Đang mở trợ lý giọng nói trên TV…"
+                else "Đang nghe… nói xong bấm micro lần nữa (hoặc thả tay nếu đang giữ)",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.primary,
+                textAlign = TextAlign.Center,
+            )
         }
 
         Spacer(Modifier.height(18.dp))
@@ -293,7 +307,195 @@ private fun RemoteScreen(vm: MainViewModel, s: UiState, onKeyboard: () -> Unit) 
                 KeyIcon(Icons.Filled.PlayArrow, "Phát / tạm dừng")
             }
         }
+
+        Spacer(Modifier.height(18.dp))
+        Text(
+            "Bàn phím (gõ được cả trình duyệt Downloader)",
+            modifier = Modifier.fillMaxWidth(),
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(6.dp))
+        LetterKeyboard(vm)
+        Spacer(Modifier.height(gap))
+        NumberPad(vm)
         Spacer(Modifier.height(16.dp))
+    }
+}
+
+// ======================= Giọng nói =======================
+
+/**
+ * Nút micro: bấm 1 lần = bắt đầu nghe, bấm lần nữa = gửi. Giữ tay = nói, thả tay = gửi.
+ * TV không nhận micro thì dùng nhận dạng giọng nói của điện thoại rồi gõ chữ lên TV.
+ */
+@Composable
+private fun MicButton(vm: MainViewModel, s: UiState, modifier: Modifier) {
+    val ctx = LocalContext.current
+    val haptic = LocalHapticFeedback.current
+    val recognizer = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
+        val text = res.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
+        if (!text.isNullOrBlank()) vm.typeRecognized(text)
+    }
+    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        if (ok) vm.voiceDown()
+        else Toast.makeText(ctx, "Cần cho phép dùng micro để nói với TV", Toast.LENGTH_LONG).show()
+    }
+    LaunchedEffect(Unit) {
+        vm.voiceFallback.collect {
+            val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                .putExtra(RecognizerIntent.EXTRA_LANGUAGE, "vi-VN")
+                .putExtra(RecognizerIntent.EXTRA_PROMPT, "Nói để gõ lên TV")
+            runCatching { recognizer.launch(i) }.onFailure {
+                Toast.makeText(ctx, "Điện thoại không có nhận dạng giọng nói", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+    val active = s.voice != VoiceState.IDLE
+    val bg = when (s.voice) {
+        VoiceState.LISTENING -> MaterialTheme.colorScheme.error
+        VoiceState.STARTING -> MaterialTheme.colorScheme.tertiaryContainer
+        VoiceState.IDLE -> MaterialTheme.colorScheme.secondaryContainer
+    }
+    val fg = when (s.voice) {
+        VoiceState.LISTENING -> MaterialTheme.colorScheme.onError
+        VoiceState.STARTING -> MaterialTheme.colorScheme.onTertiaryContainer
+        VoiceState.IDLE -> MaterialTheme.colorScheme.onSecondaryContainer
+    }
+    val shape = RoundedCornerShape(16.dp)
+    val latestActive by androidx.compose.runtime.rememberUpdatedState(active)
+    Box(
+        modifier.clip(shape).background(bg).pointerInput(Unit) {
+            detectTapGestures(onPress = {
+                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                if (latestActive) { vm.voiceUp(); return@detectTapGestures }
+                if (ctx.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                    permission.launch(Manifest.permission.RECORD_AUDIO)
+                    return@detectTapGestures
+                }
+                val t = System.currentTimeMillis()
+                vm.voiceDown()
+                tryAwaitRelease()
+                if (System.currentTimeMillis() - t > 700) vm.voiceUp() // giữ tay rồi thả = gửi
+            })
+        },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(Icons.Filled.Mic, contentDescription = "Giọng nói", tint = fg, modifier = Modifier.size(26.dp))
+    }
+}
+
+// ======================= Bàn phím chữ =======================
+
+private enum class Shift { OFF, ONCE, LOCK }
+
+/**
+ * Bàn phím chữ đầy đủ ngay trên màn hình remote. Mỗi phím gửi một PHÍM BẤM thật tới TV
+ * (như cắm bàn phím USB), nên gõ được cả những ô không nhận bộ gõ từ xa. TV không nhận chữ có dấu.
+ */
+@Composable
+private fun LetterKeyboard(vm: MainViewModel) {
+    var symbols by rememberSaveable { mutableStateOf(false) }
+    var shift by remember { mutableStateOf(Shift.OFF) }
+    var lastShiftTap by remember { mutableStateOf(0L) }
+    val gap = 5.dp
+    val h = 46.dp
+    val fn = MaterialTheme.colorScheme.secondaryContainer
+    val fnText = MaterialTheme.colorScheme.onSecondaryContainer
+
+    @Composable
+    fun androidx.compose.foundation.layout.RowScope.Ch(c: Char, w: Float = 1f) {
+        val shown = if (!symbols && shift != Shift.OFF) c.uppercaseChar() else c
+        KeyButton(Modifier.weight(w).height(h), shape = RoundedCornerShape(9.dp), onPress = {
+            vm.typeChar(shown)
+            if (shift == Shift.ONCE) shift = Shift.OFF
+        }) { KeyLabel(shown.toString(), 18) }
+    }
+
+    @Composable
+    fun androidx.compose.foundation.layout.RowScope.Fn(
+        w: Float, repeat: Boolean = false, onPress: () -> Unit, content: @Composable () -> Unit,
+    ) = KeyButton(
+        Modifier.weight(w).height(h), repeat = repeat, container = fn, contentColor = fnText,
+        shape = RoundedCornerShape(9.dp), border = false, onPress = onPress, content = content,
+    )
+
+    @Composable
+    fun KeyRow(content: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit) =
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(gap), content = content)
+
+    Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        if (!symbols) {
+            KeyRow { "qwertyuiop".forEach { Ch(it) } }
+            KeyRow {
+                Spacer(Modifier.weight(0.5f))
+                "asdfghjkl".forEach { Ch(it) }
+                Spacer(Modifier.weight(0.5f))
+            }
+            KeyRow {
+                KeyButton(
+                    Modifier.weight(1.5f).height(h),
+                    container = if (shift == Shift.OFF) fn else MaterialTheme.colorScheme.primary,
+                    contentColor = if (shift == Shift.OFF) fnText else MaterialTheme.colorScheme.onPrimary,
+                    shape = RoundedCornerShape(9.dp), border = false,
+                    onPress = {
+                        val now = System.currentTimeMillis()
+                        shift = when {
+                            shift == Shift.ONCE && now - lastShiftTap < 400 -> Shift.LOCK
+                            shift == Shift.OFF -> Shift.ONCE
+                            else -> Shift.OFF
+                        }
+                        lastShiftTap = now
+                    },
+                ) {
+                    Icon(
+                        Icons.Filled.KeyboardArrowUp,
+                        contentDescription = if (shift == Shift.LOCK) "Caps lock" else "Shift",
+                        modifier = Modifier.size(if (shift == Shift.LOCK) 28.dp else 24.dp),
+                    )
+                }
+                "zxcvbnm".forEach { Ch(it) }
+                Fn(1.5f, repeat = true, onPress = { vm.press(TvKey.DEL) }) {
+                    KeyIcon(Icons.AutoMirrored.Filled.Backspace, "Xoá", 20)
+                }
+            }
+            KeyRow {
+                Fn(1.4f, onPress = { symbols = true }) { KeyLabel("?123", 13) }
+                Ch('/')
+                KeyButton(Modifier.weight(3.4f).height(h), shape = RoundedCornerShape(9.dp),
+                    repeat = true, onPress = { vm.typeChar(' ') }) { KeyLabel("dấu cách", 12) }
+                Ch('.')
+                Fn(1.3f, onPress = { vm.typeChars(".com") }) { KeyLabel(".com", 12) }
+                Fn(1.5f, onPress = { vm.press(TvKey.ENTER) }) {
+                    KeyIcon(Icons.AutoMirrored.Filled.KeyboardReturn, "Enter", 20)
+                }
+            }
+        } else {
+            KeyRow { "@#&_-+=()/".forEach { Ch(it) } }
+            KeyRow {
+                Spacer(Modifier.weight(0.5f))
+                "!?:;'\"*%$".forEach { Ch(it) }
+                Spacer(Modifier.weight(0.5f))
+            }
+            KeyRow {
+                ",~<>[]\\|".forEach { Ch(it) }
+                Fn(2f, repeat = true, onPress = { vm.press(TvKey.DEL) }) {
+                    KeyIcon(Icons.AutoMirrored.Filled.Backspace, "Xoá", 20)
+                }
+            }
+            KeyRow {
+                Fn(1.4f, onPress = { symbols = false }) { KeyLabel("ABC", 13) }
+                Ch(',')
+                KeyButton(Modifier.weight(3.4f).height(h), shape = RoundedCornerShape(9.dp),
+                    repeat = true, onPress = { vm.typeChar(' ') }) { KeyLabel("dấu cách", 12) }
+                Ch('.')
+                Fn(1.3f, onPress = { vm.typeChars("http://") }) { KeyLabel("http", 12) }
+                Fn(1.5f, onPress = { vm.press(TvKey.ENTER) }) {
+                    KeyIcon(Icons.AutoMirrored.Filled.KeyboardReturn, "Enter", 20)
+                }
+            }
+        }
     }
 }
 
@@ -399,21 +601,12 @@ private fun KeyboardPanel(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 4.dp),
         )
-        Row(
-            Modifier.fillMaxWidth().padding(start = 4.dp, top = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("Gửi chữ có dấu", fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                Text(
-                    if (s.keepAccents) "Tắt nếu TV hiện sai chữ có dấu"
-                    else "Đang gửi không dấu (ô tìm YouTube không nhận dấu)",
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Switch(checked = s.keepAccents, onCheckedChange = { vm.setKeepAccents(it) })
-        }
+        Text(
+            "TV chỉ nhận chữ không dấu khi gõ qua Wi‑Fi, nên app tự bỏ dấu: gõ \"khinh khí cầu\" → TV nhận \"khinh khi cau\". YouTube vẫn tìm đúng.",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 4.dp, top = 6.dp, end = 4.dp),
+        )
         Spacer(Modifier.height(10.dp))
         OutlinedTextField(
             value = text,

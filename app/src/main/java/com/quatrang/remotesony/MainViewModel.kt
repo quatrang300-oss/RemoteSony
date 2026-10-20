@@ -25,6 +25,7 @@ import kotlinx.coroutines.withContext
 
 enum class Link { NONE, CONNECTING, CONNECTED, OFFLINE }
 enum class PairStep { NONE, STARTING, WAITING_CODE, CHECKING }
+enum class VoiceState { IDLE, STARTING, LISTENING }
 
 data class UiState(
     val tvName: String? = null,
@@ -40,6 +41,7 @@ data class UiState(
     val currentApp: String? = null,
     val showSetup: Boolean = true,
     val keepAccents: Boolean = false,
+    val voice: VoiceState = VoiceState.IDLE,
 )
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
@@ -260,6 +262,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ---- Bàn phím chữ trên màn hình remote: gửi PHÍM BẤM như bàn phím thật ----
+    // Gõ được cả vào những ô không nhận bộ gõ từ xa (VD trình duyệt của Downloader).
+    fun typeChar(c: Char) {
+        val k = com.quatrang.remotesony.tv.TvChars.of(c) ?: return
+        val r = wifiRemote
+        if (r == null) {
+            toast("Bàn phím chữ cần kết nối Wi‑Fi với TV")
+            connect()
+            return
+        }
+        r.sendCharKey(k.code, k.shift)
+    }
+
+    fun typeChars(text: String) = text.forEach { typeChar(it) }
+
     // ---- Gõ chữ lên TV ----
     // Bộ gõ tiếng Việt (Laban Key, Gboard…) gõ theo "từ đang soạn": mỗi phím Telex/VNI có thể sửa
     // lại cả từ (VD "cau" + f -> "cầu"), nên nội dung đổi liên tục ở giữa từ, không chỉ thêm vào cuối.
@@ -316,20 +333,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Ô tìm của nhiều app TV (VD YouTube) không nhận chữ có dấu -> mặc định gửi chữ không dấu.
-     * Có dấu thì gửi dạng dựng sẵn (NFC): bộ gõ đặt "Unicode tổ hợp" sẽ tách dấu thành ký tự riêng,
-     * TV hiện sai hoặc ô tìm bỏ mất dấu.
+     * Gõ qua Wi‑Fi, TV chỉ nhận chữ không dấu: chữ có dấu (ô, ế, đ…) bị TV bỏ qua, còn phím xoá
+     * vẫn chạy, nên mỗi lần gõ dấu lại mất một chữ ("tôi không" -> "ti khng").
+     * Vì vậy luôn gửi chữ đã bỏ dấu; ô gõ trên điện thoại vẫn giữ nguyên tiếng Việt có dấu.
      */
-    private fun forTv(text: String): String =
-        if (_state.value.keepAccents) java.text.Normalizer.normalize(text, java.text.Normalizer.Form.NFC)
-        else stripAccents(text)
-
-    fun setKeepAccents(keep: Boolean) {
-        prefs.edit().putBoolean("keepAccents", keep).apply()
-        _state.update { it.copy(keepAccents = keep) }
-        // đổi giữa chừng: đưa chữ trên TV về đúng kiểu mới
-        if (wifiRemote != null && lastTyped.isNotEmpty()) { wanted = forTv(lastTyped); scheduleSync() }
-    }
+    private fun forTv(text: String): String = stripAccents(text)
 
     /** Ô trên TV đang chứa [current] (vừa mở bàn phím / vừa xoá trắng). */
     fun resetTyped(current: String) {
@@ -340,12 +348,96 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         scheduleSync()
     }
 
+    // ---------------- Giọng nói ----------------
+    // Bấm (hoặc giữ) nút micro: app bấm phím Tìm kiếm trên TV, TV mở Google Assistant và nhận âm thanh
+    // từ micro điện thoại (giống app Google TV). TV không hỗ trợ / không trả lời thì
+    // dùng nhận dạng giọng nói của điện thoại rồi gõ kết quả lên TV.
+
+    /** Yêu cầu giao diện mở nhận dạng giọng nói của điện thoại (dự phòng). */
+    private val _voiceFallback = MutableSharedFlow<Unit>(extraBufferCapacity = 2)
+    val voiceFallback: SharedFlow<Unit> = _voiceFallback
+
+    @Volatile private var voiceHeld = false
+    private var voiceJob: Job? = null
+
+    fun voiceDown() {
+        val r = wifiRemote
+        if (r == null) {
+            toast("Giọng nói cần kết nối Wi‑Fi với TV")
+            connect()
+            return
+        }
+        if (voiceJob?.isActive == true) { voiceHeld = false; return } // bấm lần nữa = dừng
+        if (!r.voiceSupported) { _voiceFallback.tryEmit(Unit); return }
+        voiceHeld = true
+        _state.update { it.copy(voice = VoiceState.STARTING) }
+        voiceJob = viewModelScope.launch(Dispatchers.IO) {
+            try {
+                if (!r.startVoice()) {
+                    if (voiceHeld) _voiceFallback.tryEmit(Unit) // TV không mở micro -> dùng điện thoại
+                    return@launch
+                }
+                _state.update { it.copy(voice = VoiceState.LISTENING) }
+                record(r)
+                r.endVoice()
+            } finally {
+                _state.update { it.copy(voice = VoiceState.IDLE) }
+            }
+        }
+    }
+
+    fun voiceUp() { voiceHeld = false }
+
+    @android.annotation.SuppressLint("MissingPermission")
+    private fun record(r: AndroidTvRemote) {
+        val app = getApplication<Application>()
+        if (app.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            toast("Cần cho phép dùng micro")
+            return
+        }
+        val rate = 8000
+        val min = android.media.AudioRecord.getMinBufferSize(
+            rate, android.media.AudioFormat.CHANNEL_IN_MONO, android.media.AudioFormat.ENCODING_PCM_16BIT)
+        val rec = runCatching {
+            android.media.AudioRecord(
+                android.media.MediaRecorder.AudioSource.VOICE_RECOGNITION, rate,
+                android.media.AudioFormat.CHANNEL_IN_MONO, android.media.AudioFormat.ENCODING_PCM_16BIT,
+                maxOf(min, 3200) * 2)
+        }.getOrNull()
+        if (rec == null || rec.state != android.media.AudioRecord.STATE_INITIALIZED) {
+            rec?.release()
+            toast("Không mở được micro")
+            return
+        }
+        val buf = ByteArray(1600) // 100 ms
+        val until = System.currentTimeMillis() + 15_000 // tối đa 15 giây
+        try {
+            rec.startRecording()
+            while (voiceHeld && r.isReady && System.currentTimeMillis() < until) {
+                val n = rec.read(buf, 0, buf.size)
+                if (n > 0) r.sendVoice(buf, n) else if (n < 0) break
+            }
+        } finally {
+            runCatching { rec.stop() }
+            rec.release()
+            voiceHeld = false
+        }
+    }
+
+    /** Kết quả nhận dạng của điện thoại -> gõ lên TV (bỏ dấu, như bàn phím chữ). */
+    fun typeRecognized(text: String) {
+        if (text.isBlank()) return
+        typeChars(stripAccents(text.trim()))
+    }
+
     fun launchApp(link: String) {
         val r = wifiRemote
         if (r != null) r.launchApp(link) else toast("Mở ứng dụng cần kết nối Wi‑Fi với TV")
     }
 
     override fun onCleared() {
+        voiceHeld = false
         typer.shutdownNow()
         discovery.stop()
         remote?.close()
