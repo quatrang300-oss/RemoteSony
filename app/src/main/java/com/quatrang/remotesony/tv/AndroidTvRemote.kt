@@ -139,17 +139,51 @@ class AndroidTvRemote(
     /** Ghi toàn bộ nội dung [text] vào ô nhập đang mở trên TV. */
     fun sendText(text: String) {
         if (text.isEmpty()) return
+        send { textMsg(text) }
+    }
+
+    private fun ProtoWriter.textMsg(text: String) {
         val pos = text.length - 1
-        send {
-            message(21) {
-                int(1, imeCounter)
-                int(2, fieldCounter)
-                message(3) {
-                    int(1, 1)
-                    message(2) { int(1, pos); int(2, pos); string(3, text) }
-                }
+        message(21) {
+            int(1, imeCounter)
+            int(2, fieldCounter)
+            message(3) {
+                int(1, 1)
+                message(2) { int(1, pos); int(2, pos); string(3, text) }
             }
         }
+    }
+
+    /**
+     * Xoá [deleteCount] ký tự trước con trỏ rồi chèn [insert], ĐÚNG THỨ TỰ.
+     * Phím xoá đi đường "phím bấm" còn chữ đi đường "bộ gõ" của TV: hai đường này TV xử lý
+     * không theo thứ tự, nên nếu gửi liền nhau chữ mới có thể được chèn trước rồi bị chính
+     * các phím xoá xoá mất (VD "cau" -> "cầu" thành "cau"). Vì vậy chờ TV xoá xong rồi mới chèn.
+     * Trả về Future hoàn tất khi đã gửi xong (để bộ đồng bộ gộp các thay đổi gõ nhanh).
+     */
+    fun edit(deleteCount: Int, insert: String): java.util.concurrent.Future<*>? {
+        if (closed) return null
+        val del = ProtoWriter().apply { message(10) { int(1, KEY_DEL); int(2, DIRECTION_SHORT) } }.toByteArray()
+        return runCatching {
+            writer.submit(Runnable {
+                try {
+                    val o = out ?: return@Runnable
+                    repeat(deleteCount) { i ->
+                        Framing.write(o, del)
+                        if (i % 8 == 7) Thread.sleep(15)
+                    }
+                    if (insert.isNotEmpty()) {
+                        if (deleteCount > 0) Thread.sleep((90L + 20L * deleteCount).coerceAtMost(1500L))
+                        // dựng gói chữ SAU khi chờ: bộ đếm ô nhập TV gửi về có thể đã đổi
+                        Framing.write(o, ProtoWriter().apply { textMsg(insert) }.toByteArray())
+                    }
+                } catch (t: InterruptedException) {
+                } catch (t: Throwable) {
+                    Log.w(TAG, "Gửi lỗi", t)
+                    runCatching { socket?.close() }
+                }
+            })
+        }.getOrNull()
     }
 
     fun launchApp(link: String) = send { message(90) { string(1, link) } }
@@ -174,6 +208,7 @@ class AndroidTvRemote(
     companion object {
         private const val TAG = "AtvRemote"
         private const val DIRECTION_SHORT = 3
+        private const val KEY_DEL = 67
         // PING | KEY | IME | POWER | VOLUME | APP_LINK
         const val FEATURES = 1 or 2 or 4 or 32 or 64 or 512
 

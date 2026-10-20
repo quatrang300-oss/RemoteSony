@@ -260,43 +260,84 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private var lastSent = ""
+    // ---- Gõ chữ lên TV ----
+    // Bộ gõ tiếng Việt (Laban Key, Gboard…) gõ theo "từ đang soạn": mỗi phím Telex/VNI có thể sửa
+    // lại cả từ (VD "cau" + f -> "cầu"), nên nội dung đổi liên tục ở giữa từ, không chỉ thêm vào cuối.
+    // Một luồng riêng đưa ô trên TV về đúng nội dung mới nhất: tính phần khác nhau, xoá phần cũ,
+    // chờ TV xoá xong rồi mới chèn phần mới; các thay đổi đến trong lúc đang gửi được gộp lại.
+    private val typer = java.util.concurrent.Executors.newSingleThreadExecutor()
+    @Volatile private var wanted = ""      // nội dung TV cần có
+    @Volatile private var lastSent = ""    // nội dung TV đang có (luồng typer ghi)
+    @Volatile private var resetTo: String? = null
+    private var lastTyped = ""             // chữ gốc trong ô gõ của app
+    private val syncing = java.util.concurrent.atomic.AtomicBoolean(false)
 
     /** Gọi mỗi khi nội dung ô gõ thay đổi: TV hiện đúng nội dung này. */
     fun typeText(text: String) {
+        lastTyped = text
         val r = wifiRemote
         if (r == null) {
             toast("Gõ chữ cần kết nối Wi‑Fi với TV")
             connect()
             return
         }
-        // TV CHÈN chữ nhận được vào vị trí con trỏ (không thay cả ô),
-        // nên chỉ gửi phần khác nhau: xoá phần cũ bị đổi rồi chèn phần mới.
-        // VD bộ gõ Telex đổi "cau" -> "cầu": giữ "c", xoá 2 ký tự, chèn "ầu".
-        val target = forTv(text)
-        val old = lastSent
-        var same = 0
-        val max = minOf(old.length, target.length)
-        while (same < max && old[same] == target[same]) same++
-        if (same > 0 && Character.isHighSurrogate(old[same - 1])) same--
-        val deleteCount = old.codePointCount(same, old.length)
-        repeat(deleteCount.coerceAtMost(500)) { r.sendKey(TvKey.DEL.code) }
-        val insert = target.substring(same)
-        if (insert.isNotEmpty()) r.sendText(insert)
-        lastSent = target
+        wanted = forTv(text)
+        scheduleSync()
     }
 
-    /** Ô tìm của nhiều app TV (VD YouTube) không nhận chữ có dấu -> mặc định gửi chữ không dấu. */
+    private fun scheduleSync() {
+        if (!syncing.compareAndSet(false, true)) return
+        runCatching { typer.execute { syncLoop() } }.onFailure { syncing.set(false) }
+    }
+
+    private fun syncLoop() {
+        try {
+            while (true) {
+                resetTo?.let { lastSent = it; resetTo = null }
+                val r = wifiRemote ?: break
+                val target = wanted
+                if (target == lastSent) break
+                val old = lastSent
+                var same = 0
+                val max = minOf(old.length, target.length)
+                while (same < max && old[same] == target[same]) same++
+                if (same > 0 && Character.isHighSurrogate(old[same - 1])) same--
+                val deleteCount = old.codePointCount(same, old.length).coerceAtMost(500)
+                val insert = target.substring(same)
+                val f = r.edit(deleteCount, insert) ?: break
+                runCatching { f.get(5, java.util.concurrent.TimeUnit.SECONDS) }
+                lastSent = target
+            }
+        } finally {
+            syncing.set(false)
+        }
+        // một thay đổi đến đúng lúc vòng lặp vừa dừng
+        if ((wanted != lastSent || resetTo != null) && wifiRemote != null) scheduleSync()
+    }
+
+    /**
+     * Ô tìm của nhiều app TV (VD YouTube) không nhận chữ có dấu -> mặc định gửi chữ không dấu.
+     * Có dấu thì gửi dạng dựng sẵn (NFC): bộ gõ đặt "Unicode tổ hợp" sẽ tách dấu thành ký tự riêng,
+     * TV hiện sai hoặc ô tìm bỏ mất dấu.
+     */
     private fun forTv(text: String): String =
-        if (_state.value.keepAccents) text else stripAccents(text)
+        if (_state.value.keepAccents) java.text.Normalizer.normalize(text, java.text.Normalizer.Form.NFC)
+        else stripAccents(text)
 
     fun setKeepAccents(keep: Boolean) {
         prefs.edit().putBoolean("keepAccents", keep).apply()
         _state.update { it.copy(keepAccents = keep) }
+        // đổi giữa chừng: đưa chữ trên TV về đúng kiểu mới
+        if (wifiRemote != null && lastTyped.isNotEmpty()) { wanted = forTv(lastTyped); scheduleSync() }
     }
 
+    /** Ô trên TV đang chứa [current] (vừa mở bàn phím / vừa xoá trắng). */
     fun resetTyped(current: String) {
-        lastSent = forTv(current)
+        lastTyped = current
+        val v = forTv(current)
+        resetTo = v
+        wanted = v
+        scheduleSync()
     }
 
     fun launchApp(link: String) {
@@ -305,6 +346,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        typer.shutdownNow()
         discovery.stop()
         remote?.close()
         pairing?.close()

@@ -422,7 +422,7 @@ private fun KeyboardPanel(
             placeholder = { Text("Nhập nội dung cần tìm…") },
             singleLine = true,
             shape = RoundedCornerShape(14.dp),
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search, autoCorrectEnabled = false),
             keyboardActions = KeyboardActions(
                 onSearch = { vm.press(TvKey.ENTER) },
                 onDone = { vm.press(TvKey.ENTER) },
