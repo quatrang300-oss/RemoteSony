@@ -58,6 +58,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -393,12 +394,27 @@ private fun KeyboardPanel(
             LinkPill(vm, s)
         }
         Text(
-            "Chữ bạn gõ hiện ngay trên ô tìm kiếm của TV. Dùng bàn phím điện thoại, gõ được tiếng Việt.",
+            "Chữ bạn gõ hiện ngay trên ô tìm kiếm của TV. Trước khi gõ, xoá sạch ô tìm trên TV.",
             fontSize = 13.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 4.dp),
         )
-        Spacer(Modifier.height(12.dp))
+        Row(
+            Modifier.fillMaxWidth().padding(start = 4.dp, top = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Gửi chữ có dấu", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                Text(
+                    if (s.keepAccents) "Tắt nếu TV hiện sai chữ có dấu"
+                    else "Đang gửi không dấu (ô tìm YouTube không nhận dấu)",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(checked = s.keepAccents, onCheckedChange = { vm.setKeepAccents(it) })
+        }
+        Spacer(Modifier.height(10.dp))
         OutlinedTextField(
             value = text,
             onValueChange = onText,
