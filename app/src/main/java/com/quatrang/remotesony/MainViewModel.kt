@@ -39,6 +39,7 @@ data class UiState(
     val muted: Boolean = false,
     val currentApp: String? = null,
     val showSetup: Boolean = true,
+    val keepAccents: Boolean = false,
 )
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
@@ -54,6 +55,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             irOnly = prefs.getBoolean("irOnly", false),
             hasIr = ir.available,
             showSetup = prefs.getString("host", null) == null && !prefs.getBoolean("irOnly", false),
+            keepAccents = prefs.getBoolean("keepAccents", false),
         )
     )
     val state: StateFlow<UiState> = _state
@@ -268,16 +270,33 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             connect()
             return
         }
-        if (text.isEmpty()) {
-            repeat(lastSent.length.coerceAtMost(200)) { r.sendKey(TvKey.DEL.code) }
-        } else {
-            r.sendText(text)
-        }
-        lastSent = text
+        // TV CHÈN chữ nhận được vào vị trí con trỏ (không thay cả ô),
+        // nên chỉ gửi phần khác nhau: xoá phần cũ bị đổi rồi chèn phần mới.
+        // VD bộ gõ Telex đổi "cau" -> "cầu": giữ "c", xoá 2 ký tự, chèn "ầu".
+        val target = forTv(text)
+        val old = lastSent
+        var same = 0
+        val max = minOf(old.length, target.length)
+        while (same < max && old[same] == target[same]) same++
+        if (same > 0 && Character.isHighSurrogate(old[same - 1])) same--
+        val deleteCount = old.codePointCount(same, old.length)
+        repeat(deleteCount.coerceAtMost(500)) { r.sendKey(TvKey.DEL.code) }
+        val insert = target.substring(same)
+        if (insert.isNotEmpty()) r.sendText(insert)
+        lastSent = target
+    }
+
+    /** Ô tìm của nhiều app TV (VD YouTube) không nhận chữ có dấu -> mặc định gửi chữ không dấu. */
+    private fun forTv(text: String): String =
+        if (_state.value.keepAccents) text else stripAccents(text)
+
+    fun setKeepAccents(keep: Boolean) {
+        prefs.edit().putBoolean("keepAccents", keep).apply()
+        _state.update { it.copy(keepAccents = keep) }
     }
 
     fun resetTyped(current: String) {
-        lastSent = current
+        lastSent = forTv(current)
     }
 
     fun launchApp(link: String) {
@@ -291,3 +310,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         pairing?.close()
     }
 }
+
+/** "khinh khí cầu" -> "khinh khi cau", "đường" -> "duong". */
+fun stripAccents(s: String): String =
+    java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFD)
+        .replace(Regex("\\p{Mn}+"), "")
+        .replace('đ', 'd')
+        .replace('Đ', 'D')
